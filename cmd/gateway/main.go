@@ -14,7 +14,7 @@ func main() {
 	http.HandleFunc("/ws/camera", wsServer.HandleCamera)
 	http.HandleFunc("/ws/viewer", wsServer.HandleViewer)
 
-	port := ":8080"
+	port := ":5093"
 	log.Printf("🚀 Gateway running on port %s", port)
 	if err := http.ListenAndServe(port, nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
