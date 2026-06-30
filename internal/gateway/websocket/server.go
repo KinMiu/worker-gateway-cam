@@ -29,7 +29,7 @@ type Server struct {
 
 func NewServer() *Server {
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr: "localhost:6380",
 	})
 	s := &Server{
 		devices: make(map[string]*Client),
