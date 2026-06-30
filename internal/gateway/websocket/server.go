@@ -69,7 +69,7 @@ func (s *Server) BroadcastToFrontend(data []byte) {
 		// HANYA kirim ke Frontend (Viewer), JANGAN kirim balik ke Kamera!
 		if client.Role == "viewer" {
 			// Cegah macet: Jika dalam 100ms gambar gagal terkirim, lewati (drop frame)
-			client.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+			client.conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
 
 			err := client.conn.WriteMessage(websocket.BinaryMessage, data)
 			if err != nil {
