@@ -1,0 +1,12 @@
+# Ignore binary files
+gateway-worker
+*.exe
+
+# Ignore system files
+.DS_Store
+
+# Ignore environment files
+.env
+
+# Ignore docker data
+data/
