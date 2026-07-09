@@ -44,10 +44,10 @@ func (c *Client) ReadPump() {
 			break
 		}
 
-		// DEBUG LOG: Cetak setiap kali ada pesan masuk dari WebSocket
-		log.Printf("📥 [%s] Menerima pesan! Type: %d, Ukuran: %d bytes\n", c.ID, messageType, len(payload))
+		// MANDATORY DEBUG: Cetak APAPUN pesan yang masuk dari koneksi ini tanpa filter dulu!
+		log.Printf("📥 [%s - Role: %s] Paket Masuk! Type: %d, Ukuran: %d bytes\n", c.ID, c.Role, messageType, len(payload))
 
-		// Hanya memproses data biner stream dari Kamera
+		// Normalisasi pengecekan role (gunakan strings.ToLower jika perlu)
 		if c.Role == "camera" {
 			if messageType == websocket.BinaryMessage {
 				redisChannel := fmt.Sprintf("urken:frame:raw:%s", c.ID)
@@ -55,11 +55,9 @@ func (c *Client) ReadPump() {
 				err := c.server.Redis.Publish(ctx, redisChannel, payload).Err()
 				if err != nil {
 					log.Printf("❌ Gagal publish ke Redis untuk %s: %v\n", c.ID, err)
-				} else {
-					log.Printf("🚀 Berhasil Publish biner %s ke Redis channel [%s]\n", c.ID, redisChannel)
 				}
 			} else {
-				log.Printf("ℹ️ [%s] Pesan diabaikan karena tipe data bukan Binary (Type: %d)\n", c.ID, messageType)
+				log.Printf("ℹ️ [%s] Diabaikan karena jenis pesan bukan biner (Type: %d)\n", c.ID, messageType)
 			}
 		}
 	}
