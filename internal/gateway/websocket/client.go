@@ -1,23 +1,25 @@
 package websocket
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+var ctx = context.Background()
+
 type Client struct {
-	ID     string
-	Role   string // Tambahkan Role: "camera" atau "viewer"
+	ID     string // MAC Address jika kamera, acak/timestamp jika viewer
+	Role   string // "camera" atau "viewer"
+	Target string // MAC Address kamera yang ditargetkan (khusus viewer)
 	conn   *websocket.Conn
 	server *Server
 }
 
-// Tambahkan parameter 'role'
-func NewClient(conn *websocket.Conn, server *Server, role string) *Client {
-	id := fmt.Sprintf("%s-%d", role, time.Now().UnixNano())
+// Membuat instance client baru
+func NewClient(conn *websocket.Conn, server *Server, role string, id string) *Client {
 	return &Client{
 		ID:     id,
 		Role:   role,
@@ -29,7 +31,7 @@ func NewClient(conn *websocket.Conn, server *Server, role string) *Client {
 func (c *Client) ReadPump() {
 	defer func() {
 		c.server.RemoveDevice(c.ID)
-		log.Printf("[%s] Disconnected\n", c.ID)
+		log.Printf("[%s] Disconnected (%s)\n", c.ID, c.Role)
 		c.conn.Close()
 	}()
 
@@ -39,11 +41,14 @@ func (c *Client) ReadPump() {
 			break
 		}
 
-		// Hanya izinkan "camera" yang bisa mem-publish ke Redis
+		// Hanya memproses data biner stream dari Kamera
 		if c.Role == "camera" && messageType == websocket.BinaryMessage {
-			err := c.server.Redis.Publish(ctx, "urken:frame:raw", payload).Err()
+			// Channel Redis dinamis: urken:frame:raw:240AC4XXXXXX
+			redisChannel := fmt.Sprintf("urken:frame:raw:%s", c.ID)
+
+			err := c.server.Redis.Publish(ctx, redisChannel, payload).Err()
 			if err != nil {
-				log.Printf("Gagal publish ke Redis: %v\n", err)
+				log.Printf("Gagal publish ke Redis untuk %s: %v\n", c.ID, err)
 			}
 		}
 	}
