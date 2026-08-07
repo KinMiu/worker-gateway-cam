@@ -4,10 +4,11 @@ import (
 	"log"
 	"net/http"
 
-	"urken/internal/gateway/websocket" // Sesuaikan dengan path module project kamu
+	"urken/internal/gateway/websocket" // Pastikan modul path ini sesuai dengan go.mod kamu
 )
 
 func main() {
+	// Inisialisasi WebSocket dan PubSub server
 	wsServer := websocket.NewServer()
 
 	// Endpoint khusus kamera (ESP / RTSP Worker)
@@ -19,6 +20,6 @@ func main() {
 	port := ":5093"
 	log.Printf("🚀 Gateway running on port %s\n", port)
 	if err := http.ListenAndServe(port, nil); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		log.Fatalf("Server failed to start: %v", err)
 	}
 }
