@@ -3,22 +3,23 @@ package websocket
 import (
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 type Client struct {
-	ID     string // MAC Address (Camera) atau Viewer-ID unik (Viewer)
-	Role   string // "camera" atau "viewer"
-	Target string // MAC Address kamera yang ingin ditonton (Khusus Viewer)
-	conn   *websocket.Conn
-	server *Server
-	send   chan []byte // Buffered channel untuk melempar frame secara non-blocking
+	ID        string // MAC Address (Camera) atau Viewer-ID unik (Viewer)
+	Role      string // "camera" or "viewer"
+	Target    string // MAC Address kamera yang ingin ditonton (Khusus Viewer)
+	conn      *websocket.Conn
+	server    *Server
+	send      chan []byte // Buffered channel untuk melempar frame secara non-blocking
+	closeOnce sync.Once   // Mencegah double-close channel saat crash/reconnect cepat
 }
 
 // WritePump menangani pengiriman data dari Go Channel ke WebSocket Connection.
-// Menggunakan Heartbeat (Ping/Pong) untuk memastikan koneksi tetap hidup/terdeteksi putus.
 func (c *Client) WritePump() {
 	ticker := time.NewTicker(30 * time.Second) // Ping tiap 30 detik
 	defer func() {
@@ -31,12 +32,21 @@ func (c *Client) WritePump() {
 		case message, ok := <-c.send:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			if !ok {
-				// Channel ditutup oleh RemoveClient
+				// Channel ditutup oleh proses cleanup ReadPump
 				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			if err := c.conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
+			// FIX: Menggunakan TextMessage jika data enhanced dari Redis PubSub berupa Base64/JSON String
+			// Agar frontend browser bisa langsung menangkap payloadnya dengan mudah.
+			var err error
+			if c.Role == "viewer" {
+				err = c.conn.WriteMessage(websocket.TextMessage, message)
+			} else {
+				err = c.conn.WriteMessage(websocket.BinaryMessage, message)
+			}
+
+			if err != nil {
 				return
 			}
 
@@ -54,6 +64,12 @@ func (c *Client) ReadPump() {
 	defer func() {
 		c.server.RemoveClient(c)
 		c.conn.Close()
+
+		// Gunakan sync.Once agar penutupan channel aman dari race condition reconnect instan
+		c.closeOnce.Do(func() {
+			close(c.send)
+		})
+
 		log.Printf("🔴 [%s] Disconnected (%s)\n", c.ID, c.Role)
 	}()
 

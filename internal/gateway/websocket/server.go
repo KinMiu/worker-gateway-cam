@@ -30,8 +30,9 @@ type Server struct {
 }
 
 func NewServer() *Server {
+	// Koneksi ke Redis internal VPS
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6380", // Adjust port/host Redis kamu
+		Addr: "localhost:6380", // Disesuaikan dengan port Redis kamu
 	})
 
 	s := &Server{
@@ -64,7 +65,9 @@ func (s *Server) RemoveClient(c *Client) {
 	defer s.mu.Unlock()
 
 	if c.Role == "camera" {
-		delete(s.cameras, c.ID)
+		if _, exists := s.cameras[c.ID]; exists {
+			delete(s.cameras, c.ID)
+		}
 	} else if c.Role == "viewer" {
 		if targetMap, exists := s.viewers[c.Target]; exists {
 			delete(targetMap, c.ID)
@@ -73,9 +76,6 @@ func (s *Server) RemoveClient(c *Client) {
 			}
 		}
 	}
-
-	// Tutup channel internal pengiriman
-	close(c.send)
 }
 
 func (s *Server) ListenToEnhancedFrames() {
@@ -138,7 +138,7 @@ func (s *Server) HandleCamera(w http.ResponseWriter, r *http.Request) {
 		Role:   "camera",
 		conn:   conn,
 		server: s,
-		send:   make(chan []byte, 30), // Buffer frame
+		send:   make(chan []byte, 30),
 	}
 	s.AddClient(client)
 
@@ -167,7 +167,7 @@ func (s *Server) HandleViewer(w http.ResponseWriter, r *http.Request) {
 		Target: targetMac,
 		conn:   conn,
 		server: s,
-		send:   make(chan []byte, 30), // Buffer frame
+		send:   make(chan []byte, 30),
 	}
 	s.AddClient(client)
 
