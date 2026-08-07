@@ -88,6 +88,16 @@ func (s *Server) ListenToEnhancedFrames() {
 	for msg := range ch {
 		if len(msg.Channel) > prefixLen {
 			macKamera := msg.Channel[prefixLen:]
+			s.mu.RLock()
+			targetViewers, exists := s.viewers[macKamera]
+
+			// >>> TAMBAHKAN INDIKATOR LOG DI SINI <<<
+			if exists && len(targetViewers) > 0 {
+				log.Printf("📥 [REDIS SUB MATCH!] <── Terima dari Redis Enhanced untuk [%s] | Mengalirkan ke %d Viewer Frontend...\n", macKamera, len(targetViewers))
+			} else {
+				log.Printf("📥 [REDIS SUB IGNORED] <── Terima dari Redis Enhanced untuk [%s] | Tapi TIDAK ADA viewer frontend yang request.\n", macKamera)
+			}
+			s.mu.RUnlock()
 			// Teruskan payload binary mentah ke viewer yang tepat
 			s.BroadcastToTargetViewer(macKamera, []byte(msg.Payload))
 		}

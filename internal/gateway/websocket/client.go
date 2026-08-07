@@ -87,6 +87,8 @@ func (c *Client) ReadPump() {
 			err := c.server.Redis.Publish(ctx, redisChannel, payload).Err()
 			if err != nil {
 				log.Printf("❌ Gagal publish Redis dari %s: %v\n", c.ID, err)
+			} else {
+				log.Printf("📤 [REDIS PUBLISH SUCCESS] ──> Frame Mentah Kamera [%s] Berhasil Masuk Redis Raw\n", c.ID)
 			}
 		}
 	}
