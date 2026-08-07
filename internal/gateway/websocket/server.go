@@ -30,9 +30,8 @@ type Server struct {
 }
 
 func NewServer() *Server {
-	// Koneksi ke Redis internal VPS
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6380", // Disesuaikan dengan port Redis kamu
+		Addr: "localhost:6380", // Port Redis internal VPS kamu
 	})
 
 	s := &Server{
@@ -41,7 +40,7 @@ func NewServer() *Server {
 		Redis:   rdb,
 	}
 
-	// Menjalankan listener Redis di background goroutine
+	// Jalankan listener Redis di background goroutine
 	go s.ListenToEnhancedFrames()
 	return s
 }
@@ -89,6 +88,7 @@ func (s *Server) ListenToEnhancedFrames() {
 	for msg := range ch {
 		if len(msg.Channel) > prefixLen {
 			macKamera := msg.Channel[prefixLen:]
+			// Teruskan payload binary mentah ke viewer yang tepat
 			s.BroadcastToTargetViewer(macKamera, []byte(msg.Payload))
 		}
 	}
@@ -102,7 +102,7 @@ func (s *Server) BroadcastToTargetViewer(macKamera string, data []byte) {
 		return
 	}
 
-	// Copy pointer client agar durasi Lock Mutex sangat singkat (mikrodetik)
+	// Copy pointer client agar durasi Lock Mutex mikrodetik
 	clients := make([]*Client, 0, len(targetViewers))
 	for _, client := range targetViewers {
 		clients = append(clients, client)
@@ -114,7 +114,7 @@ func (s *Server) BroadcastToTargetViewer(macKamera string, data []byte) {
 		select {
 		case client.send <- data:
 		default:
-			// Frame drop otomatis jika koneksi viewer slow/lagging (mencegah memory leak)
+			// Auto drop frame jika client lagging (mencegah memory leak)
 			log.Printf("⚠️ Frame dropped untuk viewer %s (Buffer Full)\n", client.ID)
 		}
 	}

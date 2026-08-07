@@ -10,18 +10,18 @@ import (
 )
 
 type Client struct {
-	ID        string // MAC Address (Camera) atau Viewer-ID unik (Viewer)
-	Role      string // "camera" or "viewer"
-	Target    string // MAC Address kamera yang ingin ditonton (Khusus Viewer)
+	ID        string // MAC Address (Camera) atau Viewer-ID (Viewer)
+	Role      string // "camera" atau "viewer"
+	Target    string // MAC Address target kamera (Khusus Viewer)
 	conn      *websocket.Conn
 	server    *Server
 	send      chan []byte // Buffered channel untuk melempar frame secara non-blocking
-	closeOnce sync.Once   // Mencegah double-close channel saat crash/reconnect cepat
+	closeOnce sync.Once   // Mencegah close channel ganda saat reconnect beruntun
 }
 
 // WritePump menangani pengiriman data dari Go Channel ke WebSocket Connection.
 func (c *Client) WritePump() {
-	ticker := time.NewTicker(30 * time.Second) // Ping tiap 30 detik
+	ticker := time.NewTicker(30 * time.Second) // Ping internal setiap 30 detik
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
@@ -32,21 +32,13 @@ func (c *Client) WritePump() {
 		case message, ok := <-c.send:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			if !ok {
-				// Channel ditutup oleh proses cleanup ReadPump
 				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			// FIX: Menggunakan TextMessage jika data enhanced dari Redis PubSub berupa Base64/JSON String
-			// Agar frontend browser bisa langsung menangkap payloadnya dengan mudah.
-			var err error
-			if c.Role == "viewer" {
-				err = c.conn.WriteMessage(websocket.TextMessage, message)
-			} else {
-				err = c.conn.WriteMessage(websocket.BinaryMessage, message)
-			}
-
-			if err != nil {
+			// FIX: Dikembalikan ke BinaryMessage karena terbukti payload Redis adalah raw biner
+			// Browser frontend otomatis mendeteksi objek ini sebagai Instance of Blob.
+			if err := c.conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
 				return
 			}
 
@@ -65,7 +57,7 @@ func (c *Client) ReadPump() {
 		c.server.RemoveClient(c)
 		c.conn.Close()
 
-		// Gunakan sync.Once agar penutupan channel aman dari race condition reconnect instan
+		// sync.Once menjaga agar penutupan channel aman dari race condition reconnect instan
 		c.closeOnce.Do(func() {
 			close(c.send)
 		})
@@ -77,7 +69,7 @@ func (c *Client) ReadPump() {
 	c.conn.SetReadLimit(10 * 1024 * 1024)
 	_ = c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
-	// Reset deadline setiap kali dapat Pong dari client
+	// Reset deadline setiap kali dapat Pong dari client browser/hardware
 	c.conn.SetPongHandler(func(string) error {
 		_ = c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		return nil
@@ -89,7 +81,7 @@ func (c *Client) ReadPump() {
 			break
 		}
 
-		// Jika dari Kamera dan berupa biner frame, publish ke Redis Channel
+		// Jika data masuk dari Kamera berbentuk biner, arahkan langsung ke Redis Raw Channel
 		if c.Role == "camera" && messageType == websocket.BinaryMessage {
 			redisChannel := fmt.Sprintf("urken:frame:raw:%s", c.ID)
 			err := c.server.Redis.Publish(ctx, redisChannel, payload).Err()
