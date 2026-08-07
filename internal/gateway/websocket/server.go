@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,89 +12,114 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var ctx = context.Background()
+
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  65536, // Naikkan ke 64 KB
-	WriteBufferSize: 65536, // Naikkan ke 64 KB
+	ReadBufferSize:  65536, // 64 KB
+	WriteBufferSize: 65536, // 64 KB
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
 }
 
 type Server struct {
-	devices map[string]*Client
+	cameras map[string]*Client            // mac -> client
+	viewers map[string]map[string]*Client // targetMac -> map[viewerID]*Client
 	mu      sync.RWMutex
 	Redis   *redis.Client
 }
 
 func NewServer() *Server {
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6380", // Sesuaikan port Redis kamu
+		Addr: "localhost:6380", // Adjust port/host Redis kamu
 	})
 
 	s := &Server{
-		devices: make(map[string]*Client),
+		cameras: make(map[string]*Client),
+		viewers: make(map[string]map[string]*Client),
 		Redis:   rdb,
 	}
 
-	// Menjalankan background worker untuk mendengarkan hasil olah frame dari sistem AI
+	// Menjalankan listener Redis di background goroutine
 	go s.ListenToEnhancedFrames()
 	return s
 }
 
-func (s *Server) AddDevice(c *Client) {
+func (s *Server) AddClient(c *Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.devices[c.ID] = c
+
+	if c.Role == "camera" {
+		s.cameras[c.ID] = c
+	} else if c.Role == "viewer" {
+		if _, exists := s.viewers[c.Target]; !exists {
+			s.viewers[c.Target] = make(map[string]*Client)
+		}
+		s.viewers[c.Target][c.ID] = c
+	}
 }
 
-func (s *Server) RemoveDevice(id string) {
+func (s *Server) RemoveClient(c *Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.devices, id)
+
+	if c.Role == "camera" {
+		delete(s.cameras, c.ID)
+	} else if c.Role == "viewer" {
+		if targetMap, exists := s.viewers[c.Target]; exists {
+			delete(targetMap, c.ID)
+			if len(targetMap) == 0 {
+				delete(s.viewers, c.Target)
+			}
+		}
+	}
+
+	// Tutup channel internal pengiriman
+	close(c.send)
 }
 
-// Background Worker mendengarkan channel bermotif Wildcard (*) di Redis
 func (s *Server) ListenToEnhancedFrames() {
-	// Mendengarkan channel seperti: urken:frame:enhanced:240AC4XXXXXX
 	pubsub := s.Redis.PSubscribe(ctx, "urken:frame:enhanced:*")
 	defer pubsub.Close()
 	ch := pubsub.Channel()
 
 	log.Println("⚡ Redis PSubscribe aktif pada urken:frame:enhanced:*")
 
+	prefixLen := len("urken:frame:enhanced:")
 	for msg := range ch {
-		// Ekstrak MAC Address dari nama channel Redis yang mengirim pesan
-		// "urken:frame:enhanced:240AC4XXXXXX" -> diambil "240AC4XXXXXX"
-		prefixLen := len("urken:frame:enhanced:")
 		if len(msg.Channel) > prefixLen {
 			macKamera := msg.Channel[prefixLen:]
-
-			// Teruskan biner gambar hanya ke viewer yang meminta MAC ini
 			s.BroadcastToTargetViewer(macKamera, []byte(msg.Payload))
 		}
 	}
 }
 
-// Mengirimkan gambar spesifik ke viewer yang memintanya
 func (s *Server) BroadcastToTargetViewer(macKamera string, data []byte) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	targetViewers, exists := s.viewers[macKamera]
+	if !exists || len(targetViewers) == 0 {
+		s.mu.RUnlock()
+		return
+	}
 
-	for id, client := range s.devices {
-		// Filter: Harus bertindak sebagai viewer DAN Target MAC kamera yang diminta harus cocok
-		if client.Role == "viewer" && client.Target == macKamera {
-			// Timeout pengiriman agar tidak membebani performa server jika client lag/putus sinyal
-			client.conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	// Copy pointer client agar durasi Lock Mutex sangat singkat (mikrodetik)
+	clients := make([]*Client, 0, len(targetViewers))
+	for _, client := range targetViewers {
+		clients = append(clients, client)
+	}
+	s.mu.RUnlock()
 
-			err := client.conn.WriteMessage(websocket.BinaryMessage, data)
-			if err != nil {
-				log.Printf("[%s] Frame drop / gagal kirim ke viewer: %v\n", id, err)
-			}
+	// Kirim frame ke channel viewer secara NON-BLOCKING
+	for _, client := range clients {
+		select {
+		case client.send <- data:
+		default:
+			// Frame drop otomatis jika koneksi viewer slow/lagging (mencegah memory leak)
+			log.Printf("⚠️ Frame dropped untuk viewer %s (Buffer Full)\n", client.ID)
 		}
 	}
 }
 
-// Handler khusus untuk Hardware ESP32-CAM
 func (s *Server) HandleCamera(w http.ResponseWriter, r *http.Request) {
 	mac := r.URL.Query().Get("mac")
 	if mac == "" {
@@ -107,15 +133,20 @@ func (s *Server) HandleCamera(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Untuk kamera, ID di dalam map diisi langsung dengan MAC Address-nya
-	client := NewClient(conn, s, "camera", mac)
-	s.AddDevice(client)
+	client := &Client{
+		ID:     mac,
+		Role:   "camera",
+		conn:   conn,
+		server: s,
+		send:   make(chan []byte, 30), // Buffer frame
+	}
+	s.AddClient(client)
 
 	log.Printf("📸 [Camera Connected] MAC: %s\n", client.ID)
+	go client.WritePump()
 	go client.ReadPump()
 }
 
-// Handler khusus untuk Frontend Web/Mobile Apps
 func (s *Server) HandleViewer(w http.ResponseWriter, r *http.Request) {
 	targetMac := r.URL.Query().Get("mac")
 	if targetMac == "" {
@@ -129,13 +160,18 @@ func (s *Server) HandleViewer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Membuat ID unik untuk viewer menggunakan timestamp nano
 	viewerID := fmt.Sprintf("viewer-%d", time.Now().UnixNano())
-	client := NewClient(conn, s, "viewer", viewerID)
-	client.Target = targetMac // Kunci target MAC kamera yang ingin ditonton
+	client := &Client{
+		ID:     viewerID,
+		Role:   "viewer",
+		Target: targetMac,
+		conn:   conn,
+		server: s,
+		send:   make(chan []byte, 30), // Buffer frame
+	}
+	s.AddClient(client)
 
-	s.AddDevice(client)
-
-	log.Printf("🖥️  [Viewer Connected] ID: %s mendengarkan Kamera: %s\n", client.ID, client.Target)
+	log.Printf("🖥️  [Viewer Connected] ID: %s -> Target MAC: %s\n", client.ID, client.Target)
+	go client.WritePump()
 	go client.ReadPump()
 }

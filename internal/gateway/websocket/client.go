@@ -1,63 +1,84 @@
 package websocket
 
 import (
-	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-var ctx = context.Background()
-
 type Client struct {
-	ID     string // MAC Address jika kamera, acak/timestamp jika viewer
+	ID     string // MAC Address (Camera) atau Viewer-ID unik (Viewer)
 	Role   string // "camera" atau "viewer"
-	Target string // MAC Address kamera yang ditargetkan (khusus viewer)
+	Target string // MAC Address kamera yang ingin ditonton (Khusus Viewer)
 	conn   *websocket.Conn
 	server *Server
+	send   chan []byte // Buffered channel untuk melempar frame secara non-blocking
 }
 
-// Membuat instance client baru
-func NewClient(conn *websocket.Conn, server *Server, role string, id string) *Client {
-	return &Client{
-		ID:     id,
-		Role:   role,
-		conn:   conn,
-		server: server,
-	}
-}
-
-func (c *Client) ReadPump() {
+// WritePump menangani pengiriman data dari Go Channel ke WebSocket Connection.
+// Menggunakan Heartbeat (Ping/Pong) untuk memastikan koneksi tetap hidup/terdeteksi putus.
+func (c *Client) WritePump() {
+	ticker := time.NewTicker(30 * time.Second) // Ping tiap 30 detik
 	defer func() {
-		c.server.RemoveDevice(c.ID)
-		log.Printf("🔴 [%s] Disconnected (%s)\n", c.ID, c.Role)
+		ticker.Stop()
 		c.conn.Close()
 	}()
 
-	log.Printf("🔥 [%s] ReadPump mulai berjalan untuk %s\n", c.ID, c.Role)
+	for {
+		select {
+		case message, ok := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			if !ok {
+				// Channel ditutup oleh RemoveClient
+				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			if err := c.conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
+				return
+			}
+
+		case <-ticker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// ReadPump menangani incoming message dari WebSocket Connection.
+func (c *Client) ReadPump() {
+	defer func() {
+		c.server.RemoveClient(c)
+		c.conn.Close()
+		log.Printf("🔴 [%s] Disconnected (%s)\n", c.ID, c.Role)
+	}()
+
+	// Batasi max size payload (10MB per frame)
+	c.conn.SetReadLimit(10 * 1024 * 1024)
+	_ = c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
+	// Reset deadline setiap kali dapat Pong dari client
+	c.conn.SetPongHandler(func(string) error {
+		_ = c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
 
 	for {
 		messageType, payload, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Printf("⚠️ [%s] Error ReadMessage: %v\n", c.ID, err)
 			break
 		}
 
-		// MANDATORY DEBUG: Cetak APAPUN pesan yang masuk dari koneksi ini tanpa filter dulu!
-		log.Printf("📥 [%s - Role: %s] Paket Masuk! Type: %d, Ukuran: %d bytes\n", c.ID, c.Role, messageType, len(payload))
-
-		// Normalisasi pengecekan role (gunakan strings.ToLower jika perlu)
-		if c.Role == "camera" {
-			if messageType == websocket.BinaryMessage {
-				redisChannel := fmt.Sprintf("urken:frame:raw:%s", c.ID)
-
-				err := c.server.Redis.Publish(ctx, redisChannel, payload).Err()
-				if err != nil {
-					log.Printf("❌ Gagal publish ke Redis untuk %s: %v\n", c.ID, err)
-				}
-			} else {
-				log.Printf("ℹ️ [%s] Diabaikan karena jenis pesan bukan biner (Type: %d)\n", c.ID, messageType)
+		// Jika dari Kamera dan berupa biner frame, publish ke Redis Channel
+		if c.Role == "camera" && messageType == websocket.BinaryMessage {
+			redisChannel := fmt.Sprintf("urken:frame:raw:%s", c.ID)
+			err := c.server.Redis.Publish(ctx, redisChannel, payload).Err()
+			if err != nil {
+				log.Printf("❌ Gagal publish Redis dari %s: %v\n", c.ID, err)
 			}
 		}
 	}
